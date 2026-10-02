@@ -51,29 +51,42 @@ impl FromStr for Register {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct Disp(u64);
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct U64(u64);
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum Indexing {
+    Num(U64, Register),
+    Label(Label, Register),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct Sigma16Instruction {
     op: Sigma16Operation,
     instruction: Sigma16InstructionType,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum Sigma16InstructionType {
     RRR(RRRInstruction),
     RX(RXInstruction),
+    CMP(ComparisonInstruction),
     //Exp(ExpInstruction),
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct RRRInstruction(Register, Register, Register);
 
-#[derive(Debug, PartialEq, Eq)]
-struct RXInstruction(Register, Disp, Register);
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct RXInstruction(Register, Indexing);
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct DataInstruction(U64);
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct ComparisonInstruction(Register, Register);
+
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum Sigma16Operation {
     // Arithmetic
     Add,
@@ -108,7 +121,7 @@ enum Sigma16Operation {
     Or2,
     Xor2,
     Nand2,
-    Nor2
+    Nor2,
 }
 
 impl FromStr for Sigma16Operation {
@@ -141,20 +154,21 @@ impl FromStr for Sigma16Operation {
             "xor2" => Xor2,
             "nand2" => Nand2,
             "nor2" => Nor2,
+            "cmp" => Cmp,
             x => Err(format!("Invalid command: {x}! I am unreachable!"))?,
         })
     }
 }
 
+#[derive(Clone, Copy)]
 struct Sigma16InstructionParser;
 impl Parse for Sigma16InstructionParser {
     type Result = Sigma16Instruction;
 
     fn parse<'b>(&self, input: &'b str) -> ParseResult<'b, Self::Result> {
-        Sigma16OperationParser
-            .and(char_p(' '))
-            .and(Sigma16InstructionTypeParser)
-            .map(|((op, _), instruction)| Self::Result {
+        Sigma16OperationParser.sbws()
+            .and(Sigma16InstructionTypeParser.sbws())
+            .map(|(op, instruction)| Self::Result {
                 op,
                 instruction,
             })
@@ -162,6 +176,7 @@ impl Parse for Sigma16InstructionParser {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Sigma16OperationParser;
 impl Parse for Sigma16OperationParser {
     type Result = Sigma16Operation;
@@ -205,6 +220,7 @@ impl Parse for Sigma16OperationParser {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Sigma16InstructionTypeParser;
 impl Parse for Sigma16InstructionTypeParser {
     type Result = Sigma16InstructionType;
@@ -212,57 +228,108 @@ impl Parse for Sigma16InstructionTypeParser {
     fn parse<'b>(&self, input: &'b str) -> ParseResult<'b, Self::Result> {
         RXInstructionParser
             .or(RRRInstructionParser)
+            .or(ComparisonInstructionParser)
             .map(|result| match result {
-                Either::Left(rx) => Sigma16InstructionType::RX(rx),
-                Either::Right(rrr) => Sigma16InstructionType::RRR(rrr),
+                Either::Right(cmp) => Sigma16InstructionType::CMP(cmp),
+                Either::Left(either) => match either {
+                    Either::Right(rrr) => Sigma16InstructionType::RRR(rrr),
+                    Either::Left(rx) => Sigma16InstructionType::RX(rx),
+                }
             })
             //.map(|x| Sigma16InstructionType::RX(x))
             .parse(input)
     }
 }
 
+#[derive(Clone, Copy)]
 struct RRRInstructionParser;
 impl Parse for RRRInstructionParser {
     type Result = RRRInstruction;
 
     fn parse<'b>(&self, input: &'b str) -> ParseResult<'b, Self::Result> {
         RegisterParser
-            .sep_by(',')
-            .map(|registers| RRRInstruction(registers[0], registers[1], registers[2]))
+            .and(char_p(',').drop(RegisterParser))
+            .and(char_p(',').drop(RegisterParser))
+            .map(|((r1, r2), r3)| RRRInstruction(r1, r2, r3))
             .parse(input)
     }
 }
 
 
+#[derive(Clone, Copy)]
+struct IndexingParser;
+impl Parse for IndexingParser {
+    type Result = Indexing;
+
+    fn parse<'b>(&self, input: &'b str) -> ParseResult<'b, Self::Result> {
+        U64Parser
+            .or(LabelParser)
+            .and(char_p('[').drop(RegisterParser))
+            .and(char_p(']'))
+            .map(|((either, register), _)| match either {
+                Either::Left(u64) => Indexing::Num(u64, register),
+                Either::Right(label) => Indexing::Label(label, register),
+            })
+            .parse(input)
+    }
+}
+
+#[derive(Clone, Copy)]
 struct RXInstructionParser;
 impl Parse for RXInstructionParser {
     type Result = RXInstruction;
 
     fn parse<'b>(&self, input: &'b str) -> ParseResult<'b, Self::Result> {
         RegisterParser
-            .and(char_p(',').drop(DispParser))
-            .and(char_p('[').drop(RegisterParser))
-            .and(char_p(']'))
-            .map(|(((Rd, disp), Ra), _)| RXInstruction(Rd, disp, Ra))
+            .and(char_p(',').drop(IndexingParser))
+            .map(|(Rd, indexing)| RXInstruction(Rd, indexing))
             .parse(input)
     }
 }
 
-struct DispParser;
-impl Parse for DispParser {
-    type Result = Disp;
+#[derive(Clone, Copy)]
+struct DataInstructionParser;
+impl Parse for DataInstructionParser {
+    type Result = DataInstruction;
+
+    fn parse<'b>(&self, input: &'b str) -> ParseResult<'b, Self::Result> {
+        str_p("data")
+            .drop(whitespace().drop(U64Parser))
+            .map(|u64| DataInstruction(u64))
+            .parse(input)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ComparisonInstructionParser;
+impl Parse for ComparisonInstructionParser {
+    type Result = ComparisonInstruction;
+
+    fn parse<'b>(&self, input: &'b str) -> ParseResult<'b, Self::Result> {
+        RegisterParser
+            .and(char_p(',').drop(RegisterParser))
+            .map(|(rl, rr)| ComparisonInstruction(rl, rr))
+            .parse(input)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct U64Parser;
+impl Parse for U64Parser {
+    type Result = U64;
 
     fn parse<'b>(&self, input: &'b str) -> ParseResult<'b, Self::Result> {
         uint_p()
             .or(char_p('$').drop(FourDigitHexParser))
             .map(|x| match x {
-                Either::Left(disp) => Disp(disp),
-                Either::Right(disp) => Disp(disp),
+                Either::Left(disp) => U64(disp),
+                Either::Right(disp) => U64(disp),
             })
             .parse(input)
     }
 }
 
+#[derive(Clone, Copy)]
 struct FourDigitHexParser;
 impl Parse for FourDigitHexParser {
     type Result = u64;
@@ -277,6 +344,7 @@ impl Parse for FourDigitHexParser {
     }
 }
 
+#[derive(Clone, Copy)]
 struct HexParser;
 impl Parse for HexParser {
     type Result = u16;
@@ -323,6 +391,7 @@ impl Parse for HexParser {
     }
 }
 
+#[derive(Clone, Copy)]
 struct RegisterParser;
 impl Parse for RegisterParser {
     type Result = Register;
@@ -351,17 +420,117 @@ impl Parse for RegisterParser {
     }
 }
 
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct Comment(String);
+
+#[derive(Clone, Copy)]
+struct CommentParser;
+impl Parse for CommentParser {
+    type Result = Comment;
+
+    fn parse<'b>(&self, input: &'b str) -> ParseResult<'b, Self::Result> {
+        char_p(';')
+            .drop(any_char_p().parse_while(|x| *x != '\n').keep(char_p('\n')))
+            .map(|chars| Comment(chars.into_iter().collect()))
+            .parse(input)
+    }
+}
+
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct Label(String);
+
+#[derive(Clone, Copy)]
+struct LabelParser;
+impl Parse for LabelParser {
+    type Result = Label;
+
+    fn parse<'b>(&self, input: &'b str) -> ParseResult<'b, Self::Result> {
+        one_of_p(('a'..='z').chain('A'..='Z').map(|x| char_p(x)))
+            .and(any_char_p()
+                .parse_while(|x| x.is_alphabetic())
+            )
+            .map(|(ch, chars)| Label(std::iter::once(ch).chain(chars.into_iter()).collect()))
+            .parse(input)
+    }
+}
+
+
+#[derive(Clone, Copy)]
+struct CodeAndCommentParser<CodeParser: Parse + Copy>(CodeParser);
+impl<CodeParser: Parse + Copy> Parse for CodeAndCommentParser<CodeParser> {
+    type Result = (CodeParser::Result, Comment);
+
+    fn parse<'b>(&self, input: &'b str) -> ParseResult<'b, Self::Result> {
+        self
+            .0
+            .clone()
+            .sbws()
+            .and(CommentParser.sbws())
+            .parse(input)
+    }
+}
+
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum Line {
+    Comment(Comment),
+    Label(Label),
+    LabelAndComment(Label, Comment),
+    Instruction(Sigma16Instruction),
+    InstructionAndComment(Sigma16Instruction, Comment),
+    DataInstruction(DataInstruction),
+    Empty,
+}
+
+struct LineParser;
+impl Parse for LineParser {
+    type Result = Line;
+
+    fn parse<'b>(&self, input: &'b str) -> ParseResult<'b, Self::Result> {
+        CommentParser.sbws()
+            .or(CodeAndCommentParser(Sigma16InstructionParser).sbws())
+            .or(DataInstructionParser.sbws())
+            .or(Sigma16InstructionParser.sbws())
+            .or(CodeAndCommentParser(LabelParser).sbws())
+            .or(LabelParser.sbws())
+            .or(whitespace())
+            .map(|either| {
+                match either {
+                    Either::Right(x) => Line::Empty,
+                    Either::Left(either) => match either {
+                        Either::Right(label) => Line::Label(label),
+                        Either::Left(either) => match either {
+                            Either::Right((label, comment)) => Line::LabelAndComment(label, comment),
+                            Either::Left(either) => match either {
+                                Either::Right(instruction) => Line::Instruction(instruction),
+                                Either::Left(either) => match either {
+                                    Either::Right(data_instruction) => Line::DataInstruction(data_instruction),
+                                    Either::Left(either) => match either {
+                                        Either::Right((instruction, comment)) => Line::InstructionAndComment(instruction, comment),
+                                        Either::Left(comment) => Line::Comment(comment),
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .parse(input)
+    }
+}
+
 fn main() {
     let mut program = vec![];
     loop {
-        let mut line = String::new();
-        io::stdin().read_line(&mut line).unwrap();
-        let instruction = line.trim();
-        if line.len() == 0 {
+        let mut instruction = String::new();
+        io::stdin().read_line(&mut instruction).unwrap();
+        if instruction.len() == 0 {
             break
         }
-        let instruction = Sigma16InstructionParser.run(instruction).unwrap();
+        let instruction = LineParser.run(&instruction).unwrap();
         program.push(instruction);
     }
-    println!("{program:?}");
+    println!("{program:#?}");
 }
