@@ -120,6 +120,7 @@ enum Sigma16Operation {
     JumpZ,
     JumpNZ,
     JumpGE,
+    JumpLT,
     // Logic
     Inv,
     And2,
@@ -139,7 +140,12 @@ impl FromStr for Sigma16Operation {
         Ok(match s {
             "add" => Add,
             "sub" => Sub,
+            "mul" => Mul,
             "div" => Div,
+            "cmp" => Cmp,
+            "addc" => AddC,
+            "mulN" => MulN,
+            "divN" => DivN,
             "lea" => Lea,
             "load" => Load,
             "store" => Store,
@@ -156,13 +162,13 @@ impl FromStr for Sigma16Operation {
             "jumpz" => JumpZ,
             "jumpnz" => JumpNZ,
             "jumpge" => JumpGE,
+            "jumplt" => JumpLT,
             "inv" => Inv,
             "and2" => And2,
             "or2" => Or2,
             "xor2" => Xor2,
             "nand2" => Nand2,
             "nor2" => Nor2,
-            "cmp" => Cmp,
             "trap" => Trap,
             x => Err(format!("Invalid command: {x}! I am unreachable!"))?,
         })
@@ -191,8 +197,6 @@ impl Parse for Sigma16OperationParser {
     type Result = Sigma16Operation;
 
     fn parse<'b>(&self, input: &'b str) -> ParseResult<'b, Self::Result> {
-        use Sigma16Operation::*;
-
         one_of_p([
             str_p("add"),
             str_p("sub"),
@@ -217,6 +221,7 @@ impl Parse for Sigma16OperationParser {
             str_p("jumpz"),
             str_p("jumpnz"),
             str_p("jumpge"),
+            str_p("jumplt"),
             str_p("jump"),
             str_p("inv"),
             str_p("and2"),
@@ -486,31 +491,12 @@ impl Parse for LabelParser {
 }
 
 
-#[derive(Clone, Copy)]
-struct CodeAndCommentParser<CodeParser: Parse + Copy>(CodeParser);
-impl<CodeParser: Parse + Copy> Parse for CodeAndCommentParser<CodeParser> {
-    type Result = (CodeParser::Result, Comment);
-
-    fn parse<'b>(&self, input: &'b str) -> ParseResult<'b, Self::Result> {
-        self
-            .0
-            .clone()
-            .sbws()
-            .and(CommentParser.sbws())
-            .parse(input)
-    }
-}
-
-
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum Object {
     Comment(Comment),
     Label(Label),
-    LabelAndComment(Label, Comment),
     Instruction(Sigma16Instruction),
-    InstructionAndComment(Sigma16Instruction, Comment),
     DataInstruction(DataInstruction),
-    Empty,
 }
 
 struct ObjectParser;
@@ -552,7 +538,7 @@ impl Parse for ObjectParser {
 }
 
 fn main() {
-    let mut program = std::fs::read_to_string("examples/code1.txt").unwrap();
+    let program = std::fs::read_to_string("examples/code2.txt").unwrap();
     let ast = ObjectParser.zero_or_more().run(&program).unwrap();
     println!("{ast:#?}");
 }
