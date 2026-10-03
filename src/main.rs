@@ -1,8 +1,5 @@
-use std::str::FromStr;
+use std::{fmt::Debug, str::FromStr};
 use pa_rs::parser::*;
-use std::io::{self, BufRead};
-
-const REGISTERS: [u16; 16] = [0u16; 16];
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Register {
@@ -121,6 +118,7 @@ enum Sigma16Operation {
     JumpNZ,
     JumpGE,
     JumpLT,
+    JumpLE,
     // Logic
     Inv,
     And2,
@@ -163,6 +161,7 @@ impl FromStr for Sigma16Operation {
             "jumpnz" => JumpNZ,
             "jumpge" => JumpGE,
             "jumplt" => JumpLT,
+            "jumple" => JumpLE,
             "inv" => Inv,
             "and2" => And2,
             "or2" => Or2,
@@ -222,6 +221,7 @@ impl Parse for Sigma16OperationParser {
             str_p("jumpnz"),
             str_p("jumpge"),
             str_p("jumplt"),
+            str_p("jumple"),
             str_p("jump"),
             str_p("inv"),
             str_p("and2"),
@@ -484,8 +484,8 @@ impl Parse for LabelParser {
 
     fn parse<'b>(&self, input: &'b str) -> ParseResult<'b, Self::Result> {
         one_of_p(('a'..='z').chain('A'..='Z').map(|x| char_p(x)))
-            .one_or_more()
-            .map(|chars| Label(chars.into_iter().collect()))
+            .and(one_of_p(('a'..='z').chain('A'..='Z').chain('0'..='9').map(|x| char_p(x))).zero_or_more())
+            .map(|(first, chars)| Label(std::iter::once(first).chain(chars.into_iter()).collect()))
             .parse(input)
     }
 }
@@ -505,40 +505,195 @@ impl Parse for ObjectParser {
 
     fn parse<'b>(&self, input: &'b str) -> ParseResult<'b, Self::Result> {
         CommentParser.sbws()
-            //.or(CodeAndCommentParser(Sigma16InstructionParser).sbws())
             .or(DataInstructionParser.sbws())
             .or(Sigma16InstructionParser.sbws())
-            //.or(CodeAndCommentParser(LabelParser).sbws())
             .or(LabelParser.sbws())
-            //.or(whitespace())
             .map(|either| {
-                //match either {
-                //    Either::Right(x) => {println!("{x:?}"); Object::Empty},
-                //    Either::Left(either) =>
-                    match either {
+                match either {
                         Either::Right(label) => Object::Label(label),
                         Either::Left(either) => match either {
-                            //Either::Right((label, comment)) => Object::LabelAndComment(label, comment),
-                            //Either::Left(either) => match either {
-                                Either::Right(instruction) => Object::Instruction(instruction),
-                                Either::Left(either) => match either {
-                                    Either::Right(data_instruction) => Object::DataInstruction(data_instruction),
-                                    //Either::Left(either) => match either {
-                                     //   Either::Right((instruction, comment)) => Object::InstructionAndComment(instruction, comment),
-                                        Either::Left(comment) => Object::Comment(comment),
-                                    },
-                       //         }
-                            }
-                        //}
-                    //}
+                            Either::Right(instruction) => Object::Instruction(instruction),
+                            Either::Left(either) => match either {
+                                Either::Right(data_instruction) => Object::DataInstruction(data_instruction),
+                                Either::Left(comment) => Object::Comment(comment),
+                        },
+                    }
                 }
             })
             .parse(input)
     }
 }
 
+#[derive(PartialEq, Eq, Clone)]
+struct Ram([u16; 1 << 16]);
+
+impl Default for Ram {
+    fn default() -> Self {
+        Self([0u16; 1 << 16])
+    }
+}
+
+impl Debug for Ram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Ram").finish()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Default)]
+struct ProgramState {
+    registers: [u16; 16],
+    memory: Ram,
+    pc: u16,
+    ir: u16,
+    adr: u16,
+    status: u16,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Default)]
+struct Program {
+    state: ProgramState,
+    main: SubRoutine,
+    code: Vec<SubRoutine>,
+    data: Vec<Data>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Default)]
+struct SubRoutine {
+    typ: SubRoutineType,
+    instructions: Vec<Sigma16Instruction>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Default)]
+enum SubRoutineType {
+    #[default]
+    Main,
+    Decl(String),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct Data {
+    label: String,
+    value: Vec<u16>,
+}
+
+fn compile(ast: Vec<Object>) -> Program {
+    let no_comments: Vec<Object> = ast
+        .into_iter()
+        .filter(|x| match x {
+            Object::Comment(_) => false,
+            _ => true,
+        })
+        .collect();
+
+    let mut program = Program::default();
+
+    #[derive(Debug)]
+    enum AccumulatedInstructions {
+        DataInstructions(Vec<DataInstruction>),
+        Sigma16Instructions(Vec<Sigma16Instruction>),
+    }
+
+    let mut last_label: Option<String> = None;
+    let mut instructions = None;
+    for obj in dbg!(no_comments) {
+        match obj {
+            Object::Comment(..) => unreachable!(),
+            Object::DataInstruction(data_instruction) => {
+                match &last_label {
+                    Some(_) => {
+                        match &mut instructions {
+                            Some(AccumulatedInstructions::DataInstructions(instructions)) => {
+                                instructions.push(data_instruction);
+                            },
+                            None => {
+                                instructions = Some(AccumulatedInstructions::DataInstructions(vec![data_instruction]));
+                            },
+                            x => {
+                                dbg!(x);
+                                unreachable!()
+                            }
+                        }
+                    }
+                    None => {
+                        unreachable!()
+                    }
+                }
+            },
+            Object::Instruction(instruction) => {
+                dbg!(&instruction);
+                match &last_label {
+                    Some(_) => {
+                        match &mut instructions {
+                            Some(AccumulatedInstructions::Sigma16Instructions(instructions)) => {
+                                instructions.push(instruction);
+                            },
+                            None => {
+                                instructions = Some(AccumulatedInstructions::Sigma16Instructions(vec![instruction]));
+                            },
+                            x => {
+                                dbg!(x);
+                                unreachable!()
+                            }
+                        }
+                    },
+                    None => {
+                        program.main.instructions.push(instruction);
+                    }
+                }
+            },
+            Object::Label(label) => {
+                match (instructions.take(), last_label.as_ref()) {
+                    (Some(AccumulatedInstructions::DataInstructions(instructions)), Some(label)) => {
+                        let data = Data {
+                            label: label.clone(),
+                            value: instructions.into_iter().map(|x| x.0.0).collect(),
+                        };
+                        program.data.push(data);
+                    },
+                    (Some(AccumulatedInstructions::Sigma16Instructions(instructions)), Some(label)) => {
+                        let code = SubRoutine {
+                            typ: SubRoutineType::Decl(label.clone()),
+                            instructions
+                        };
+                        program.code.push(code);
+                    },
+                    _ => {}
+                }
+
+                last_label = Some(label.0.clone());
+            }
+        }
+    }
+
+    match (instructions, last_label) {
+        (Some(AccumulatedInstructions::DataInstructions(instructions)), Some(label)) => {
+            let data = Data {
+                label: label.clone(),
+                value: instructions.into_iter().map(|x| x.0.0).collect(),
+            };
+            program.data.push(data);
+        },
+        (Some(AccumulatedInstructions::Sigma16Instructions(instructions)), Some(label)) => {
+            let code = SubRoutine {
+                typ: SubRoutineType::Decl(label.clone()),
+                instructions,
+            };
+            program.code.push(code);
+        },
+        x => {
+            dbg!(x);
+            unreachable!();
+        }
+    }
+
+    program
+}
+
 fn main() {
-    let program = std::fs::read_to_string("examples/code2.txt").unwrap();
+    let program = std::fs::read_to_string("examples/code1.txt").unwrap();
     let ast = ObjectParser.zero_or_more().run(&program).unwrap();
     println!("{ast:#?}");
+    println!("------Program-------");
+    let exe = compile(ast);
+    println!("{exe:#?}");
 }
